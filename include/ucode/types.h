@@ -297,6 +297,8 @@ typedef struct printbuf uc_stringbuf_t;
 
 typedef void (uc_exception_handler_t)(uc_vm_t *, uc_exception_t *);
 
+struct uc_async_manager; // defined in async.h
+
 struct uc_vm {
 	uc_stack_t stack;
 	uc_exception_t exception;
@@ -330,6 +332,9 @@ struct uc_vm {
 		struct sigaction sa;
 		int sigpipe[2];
 	} signal;
+
+	// Only used when the async module is active
+	struct uc_async_manager *async_manager;
 };
 
 
