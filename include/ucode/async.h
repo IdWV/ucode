@@ -55,24 +55,24 @@ typedef struct uc_async_callback_queuer
 struct uc_async_manager
 {
     // pump timers, promises and callbacks.
-	int (*event_pump)( uc_vm_t *, unsigned max_wait, int flags );
+	int (*event_pump)( struct uc_async_manager *, unsigned max_wait, int flags );
  
     // promise functions
-    struct uc_value *(*new_promise)( uc_vm_t *, struct uc_async_promise_resolver ** );
-    void (*resolve_reject)( uc_vm_t *, struct uc_async_promise_resolver **, struct uc_value *, bool );
+    struct uc_value *(*new_promise)( struct uc_async_manager *, struct uc_async_promise_resolver ** );
+    void (*resolve_reject)( struct uc_async_manager *, struct uc_async_promise_resolver **, struct uc_value *, bool );
 
     // callback queuer functions
-    uc_async_callback_queuer_t const *(*new_callback_queuer)( uc_vm_t * );
+    uc_async_callback_queuer_t const *(*new_callback_queuer)( struct uc_async_manager * );
 };
 
 /***
- * Function returns true if the async plugin is active. It is not active when it's 
- * not loaded, or when it has already finished.
+ * Function returns a pointer to an uc_async_manager if the async plugin is active. 
+ * It is not active when it's not loaded, or when it has already finished.
  * */
-static inline bool uc_async_has_async( uc_vm_t *vm )
+static inline struct uc_async_manager *uc_async_manager_get( uc_vm_t *vm )
 {
-    if( !vm ) return false;
-    return 0 != vm->async_manager;
+    if( !vm ) return 0;
+    return (struct uc_async_manager *)ucv_resource_data(uc_vm_registry_get(vm, "async.manager"), NULL);
 }
 
 /**
@@ -114,9 +114,10 @@ enum{
 */
 static inline int uc_async_pump_once( uc_vm_t *vm, unsigned timeout )
 {
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return STATUS_OK;
-    return (*vm->async_manager->event_pump)( vm, timeout, UC_ASYNC_PUMP_PUMP );
+    return (*manager->event_pump)( manager, timeout, UC_ASYNC_PUMP_PUMP );
 }
 
 /**
@@ -124,9 +125,10 @@ static inline int uc_async_pump_once( uc_vm_t *vm, unsigned timeout )
 */
 static inline int uc_async_pump_cyclic( uc_vm_t *vm, unsigned timeout )
 {
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return STATUS_OK;
-    return (*vm->async_manager->event_pump)( vm, timeout, UC_ASYNC_PUMP_PUMP|UC_ASYNC_PUMP_CYCLIC );
+    return (*manager->event_pump)( manager, timeout, UC_ASYNC_PUMP_PUMP|UC_ASYNC_PUMP_CYCLIC );
 }
 
 /**
@@ -142,9 +144,10 @@ static inline int uc_async_pump_cyclic( uc_vm_t *vm, unsigned timeout )
 */
 static inline uc_async_callback_queuer_t const *uc_async_callback_queuer_new( uc_vm_t *vm )
 {
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return 0;
-    return (*vm->async_manager->new_callback_queuer)( vm );
+    return (*manager->new_callback_queuer)( manager );
 }
 
 /**
@@ -226,9 +229,10 @@ uc_async_callback_queuer_free(
 static inline uc_value_t *
 uc_async_promise_new( uc_vm_t *vm, uc_async_promise_resolver_t **resolver )
 {
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return 0;
-    return (*vm->async_manager->new_promise)( vm, resolver );
+    return (*manager->new_promise)( manager, resolver );
 }
 
 /**
@@ -241,11 +245,12 @@ uc_async_promise_new( uc_vm_t *vm, uc_async_promise_resolver_t **resolver )
 static inline void 
 uc_async_promise_resolve( uc_vm_t *vm, uc_async_promise_resolver_t **resolver, uc_value_t *value )
 {
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return;
     if( !resolver || !*resolver )
         return;
-    (*vm->async_manager->resolve_reject)( vm, resolver, value, true );
+    (*manager->resolve_reject)( manager, resolver, value, true );
 }
 
 /**
@@ -258,11 +263,12 @@ uc_async_promise_resolve( uc_vm_t *vm, uc_async_promise_resolver_t **resolver, u
 static inline void 
 uc_async_promise_reject( uc_vm_t *vm, uc_async_promise_resolver_t **resolver, uc_value_t *value )
 {
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return;
     if( !resolver || !*resolver )
         return;
-    (*vm->async_manager->resolve_reject)( vm, resolver, value, false );
+    (*manager->resolve_reject)( manager, resolver, value, false );
 }
 
 /* 'private' interface. Designed to be called from vm.c */
@@ -283,9 +289,10 @@ static inline int uc_async_finish( uc_vm_t *vm, int status, unsigned timeout )
 {
     if( STATUS_OK != status )
         return status;
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return status;
-    return (*vm->async_manager->event_pump)( vm, timeout, UC_ASYNC_PUMP_PUMP|UC_ASYNC_PUMP_CYCLIC|UC_ASYNC_PUMP_CLEANUP );
+    return (*manager->event_pump)( manager, timeout, UC_ASYNC_PUMP_PUMP|UC_ASYNC_PUMP_CYCLIC|UC_ASYNC_PUMP_CLEANUP );
 }
 
 /**
@@ -298,9 +305,10 @@ static inline int uc_async_finish( uc_vm_t *vm, int status, unsigned timeout )
 */
 static inline void uc_async_free( uc_vm_t *vm )
 {
-    if( !uc_async_has_async( vm ) )
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
         return;
-    (*vm->async_manager->event_pump)( vm, 0, UC_ASYNC_PUMP_CLEANUP );
+    (*manager->event_pump)( manager, 0, UC_ASYNC_PUMP_CLEANUP );
 }
 
 #endif // UCODE_ASYNC_H
