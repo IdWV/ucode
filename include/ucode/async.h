@@ -173,7 +173,7 @@ uc_async_request_callback(
 }
 
 /**
- * The counterpart of setTimeout() and setPeriodic(). 
+ * The counterpart of setTimeout() and setInterval(). 
  * For the function flags see above.
  * 
  * The return value must eventually be free'd with uc_async_free_timer.

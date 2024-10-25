@@ -860,7 +860,7 @@ async_event_pump( struct uc_async_manager *_man, unsigned max_wait, int flags)
  * But also
  * ```
  * let timer;
- * timer = async.setPeriodic( ( cnt )=>
+ * timer = async.setInterval( ( cnt )=>
  * {
  *	 if( ++cnt.cnt == 5 )
  *		 async.clearTimeout( timer );
@@ -942,7 +942,7 @@ PumpEvents(uc_vm_t *vm, size_t nargs)
  * 
  * @example
  * let timer
- * timer = async.setPeriodic( (a)=>
+ * timer = async.setInterval( (a)=>
  * {
  *	 if( async.uptime() > 5 )
  *		 async.clearTimeout( timer );

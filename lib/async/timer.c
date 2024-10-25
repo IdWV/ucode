@@ -28,7 +28,7 @@ This file is part of the async plugin for ucode
 
 /**
  * Represents a timer object as returned by
- * {@link module:async#setTimeout|setTimeout()}, {@link module:async#setPeriodic|setPeriodic()} or {@link module:async#setImmediate|setImmediate()}.
+ * {@link module:async#setTimeout|setTimeout()}, {@link module:async#setInterval|setInterval()} or {@link module:async#setImmediate|setImmediate()}.
  *
  * This class has no methods. The only sane usage is to pass it to {@link module:async#clearTimeout|clearTimeout()}
  * 
@@ -216,11 +216,11 @@ setTimeout(uc_vm_t *vm, size_t nargs)
 }
 
 /**
- * Start a periodic timer, to execute it's callback each at interval.
+ * Start a periodic timer, to execute it's callback at each interval.
  * 
  * The timer can be stopped using clearTimeout()
  * 
- * @function module:async#setPeriodic
+ * @function module:async#setInterval
  *
  * @param {Function} callback
  * 
@@ -233,7 +233,7 @@ setTimeout(uc_vm_t *vm, size_t nargs)
  * @returns {?module:async.timer}
  * 
  * @example
- * async.setPeriodic( (a)=>
+ * async.setInterval( (a)=>
  * {
  *	 print( `${++a.count}\n` );
  * }, 1000, { count: 0 } );
@@ -243,7 +243,7 @@ setTimeout(uc_vm_t *vm, size_t nargs)
  */
 
 static uc_value_t *
-setPeriodic(uc_vm_t *vm, size_t nargs)
+setInterval(uc_vm_t *vm, size_t nargs)
 {
 	return createTimer(vm, nargs, timerPeriodic);
 }
@@ -323,7 +323,7 @@ clearTimeout(uc_vm_t *vm, size_t nargs)
 
 static const uc_function_list_t local_async_fns[] = {
 	{"setTimeout", setTimeout},
-	{"setPeriodic", setPeriodic},
+	{"setInterval", setInterval},
 	{"setImmediate", setImmediate},
 	{"clearTimeout", clearTimeout},
 };
