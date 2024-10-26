@@ -293,11 +293,10 @@ endif()
 
 if(ASYNC_SUPPORT)
   set(LIBRARIES ${LIBRARIES} async_lib)
-  add_library(async_lib MODULE lib/async/manager.c lib/async/promise.c lib/async/timer.c lib/async/callback.c )
+  add_library(async_lib MODULE lib/async/manager.c lib/async/promise.c lib/async/timer.c lib/async/callback.c lib/async/alien.c )
   set_target_properties(async_lib PROPERTIES OUTPUT_NAME async PREFIX "")
   target_link_options(async_lib PRIVATE ${UCODE_MODULE_LINK_OPTIONS})
 endif()
-
 
 if(UNIT_TESTING)
   enable_testing()

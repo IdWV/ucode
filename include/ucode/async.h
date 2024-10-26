@@ -52,6 +52,12 @@ typedef struct uc_async_callback_queuer
             uc_async_timer_t **, bool clear );
 } uc_async_callback_queuer_t;
 
+typedef struct uc_async_alien
+{
+    void (*free)( struct uc_async_alien const ** );
+    int (*call)( const struct uc_async_alien *, int (*)( uc_vm_t *, void *, int flags ), void * );
+} uc_async_alient_t;
+
 struct uc_async_manager
 {
     // pump timers, promises and callbacks.
@@ -63,6 +69,9 @@ struct uc_async_manager
 
     // callback queuer functions
     uc_async_callback_queuer_t const *(*new_callback_queuer)( struct uc_async_manager * );
+
+    // alien call function
+    uc_async_alient_t const *(*new_alien)( struct uc_async_manager * );
 };
 
 /***
@@ -269,6 +278,45 @@ uc_async_promise_reject( uc_vm_t *vm, uc_async_promise_resolver_t **resolver, uc
     if( !resolver || !*resolver )
         return;
     (*manager->resolve_reject)( manager, resolver, value, false );
+}
+
+/****
+ * Create an 'alien' object, that is an object which can call script-native
+ * function from an external thread
+ */
+static inline const uc_async_alient_t *
+uc_async_alien_new( uc_vm_t *vm )
+{
+    struct uc_async_manager *manager = uc_async_manager_get( vm );
+    if( !manager )
+        return 0;
+
+    return (*manager->new_alien)( manager );
+}
+
+/****
+ * Free the alien object. As long as an alien object is
+ * around, the script will not finish
+ */
+static inline void
+uc_async_alien_free( const uc_async_alient_t **alien )
+{
+    if( alien && *alien )
+        (*alien)->free( alien );
+    *alien = 0;
+}
+
+/****
+ * Call a script function from another thread. This call will block if the
+ * script is not in 'event pumping' mode.
+ * The return value is the return value of func.
+ */
+static inline int 
+uc_async_alien_call( const uc_async_alient_t *alien, int (*func)( uc_vm_t *, void *, int flags ), void *user )
+{
+    if( !alien )
+        return EXCEPTION_RUNTIME;
+    return alien->call( alien, func, user );
 }
 
 /* 'private' interface. Designed to be called from vm.c */

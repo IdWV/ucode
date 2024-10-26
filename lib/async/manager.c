@@ -80,8 +80,9 @@ This file is part of the async plugin for ucode
 #include "promise.h"
 #include "callback.h"
 #include "timer.h"
+#include "alien.h"
 
-#ifdef HAS_UPTIME
+#ifdef ASYNC_HAS_UPTIME
 static double
 uptime( async_manager_t *manager )
 {
@@ -288,6 +289,10 @@ async_todo_put_in_list( async_manager_t *manager, async_todo_t *todo)
 {
 	DEBUG_ASSERT( 0 == todo->in_todo_list );
 	todo->in_todo_list = 1;
+
+#ifdef ASYNC_HAS_ALIENS
+    manager->alien->todo_seq++;
+#endif
 
 	int64_t due = async_todo_due(todo);
 	if( due )
@@ -561,6 +566,16 @@ _uc_async_request_callback(struct uc_async_callback_queuer const *queuer,
 	return true;
 }
 
+void
+async_wakeup( const uc_async_callback_queuer_t *queuer )
+{
+	if( !queuer )
+		return;
+	const async_callback_queuer_t *queuer2 = async_callback_queuer_cast_const( queuer );
+	async_unique_wakeup( queuer2->unique_in_vm );	
+}
+
+
 static void
 _uc_async_callback_queuer_free(struct uc_async_callback_queuer const **pqueuer)
 {
@@ -732,6 +747,10 @@ async_manager_free(uc_vm_t *vm, async_manager_t *manager)
 	}
 
 	async_callback_queuer_free( manager, manager->callback_queuer);
+
+#ifdef ASYNC_HAS_ALIENS
+	async_alien_free( manager, manager->alien );
+#endif
 	free(manager);
 }
 
@@ -783,15 +802,22 @@ async_event_pump( struct uc_async_manager *_man, unsigned max_wait, int flags)
 			{
 				if( 0 == manager->pending_promises_cnt ) // no pending promises
 				{
-					// Nothing to do anymore
-					DEBUG_PRINTF("%-1.3lf Last!\n", uptime( manager ));
-					break; // do {} while( )
+#ifdef ASYNC_HAS_ALIENS
+                    if( 0 == manager->alien->num_aliens ) // no more aliens
+#endif                    
+					{
+						// Nothing to do anymore
+						DEBUG_PRINTF("%-1.3lf Last!\n", uptime( manager ));
+						break; // do {} while( )
+					}
 				}
 				tosleep = INT64_MAX;
 			}
 
 			if (max_wait && !async_any_queued_callbacks_waiting( manager ))
 			{
+                ASYNC_ALIENT_LEAVE(manager);
+
 				if ((unsigned)tosleep > max_wait)
 					tosleep = max_wait;
 				if (tosleep > 0)
@@ -805,7 +831,15 @@ async_event_pump( struct uc_async_manager *_man, unsigned max_wait, int flags)
 						async_unique_sleep(0, tosleep);
 					DEBUG_PRINTF("%-1.3lf End wait\n", uptime( manager ));
 				}
+
+                ASYNC_ALIENT_ENTER(manager);
 			}
+            else
+            {
+                ASYNC_ALIENT_LEAVE(manager);
+                ASYNC_ALIENT_ENTER(manager);
+            }
+
 		} while ((flags & UC_ASYNC_PUMP_CYCLIC) &&
 				 (until > async_timer_current_time()));
 	} // if( flags & UC_ASYNC_PUMP_PUMP )
@@ -929,7 +963,7 @@ PumpEvents(uc_vm_t *vm, size_t nargs)
 }
 
 
-#ifdef HAS_UPTIME
+#ifdef ASYNC_HAS_UPTIME
 /**
  * Returns the uptime of the script (since importing the async plugin), in seconds, 
  * with a milli seconds resolution.
@@ -963,7 +997,7 @@ Uptime(uc_vm_t *vm, size_t args)
 
 static const uc_function_list_t local_async_fns[] = {
 	{"PumpEvents", PumpEvents},
-#ifdef HAS_UPTIME
+#ifdef ASYNC_HAS_UPTIME
 	{"uptime", Uptime},
 #endif
 };
@@ -984,10 +1018,11 @@ void uc_module_init(uc_vm_t *vm, uc_value_t *scope)
 
 	async_promise_init( manager, scope );
 	async_timer_init( manager, scope );
+	async_alien_init( manager, scope );
 
 	uc_function_list_register(scope, local_async_fns);
 
-#ifdef HAS_UPTIME
+#ifdef ASYNC_HAS_UPTIME
 	manager->start_time = async_timer_current_time();
 #endif
 }

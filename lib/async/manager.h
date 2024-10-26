@@ -25,10 +25,12 @@ This file is part of the async plugin for ucode
 #include "ucode/async.h"
 
 //#define DEBUG_PRINT
-#define HAS_UPTIME
+#define ASYNC_HAS_UPTIME
+#define ASYNC_HAS_ALIENS
+
 #ifdef DEBUG_PRINT
 #   define DEBUG_PRINTF(...) printf(__VA_ARGS__)
-#   define HAS_UPTIME
+#   define ASYNC_HAS_UPTIME
 #else
 #   define DEBUG_PRINTF(...)
 #endif
@@ -42,6 +44,7 @@ This file is part of the async plugin for ucode
 struct async_todo;
 struct async_promise;
 struct async_callback_link;
+struct async_alien;
 
 struct async_manager
 {
@@ -63,9 +66,12 @@ struct async_manager
 	struct uc_async_callback_queuer *callback_queuer;
 
 
-#ifdef HAS_UPTIME
+#ifdef ASYNC_HAS_UPTIME
 	// For uptime
 	int64_t start_time;
+#endif
+#ifdef ASYNC_HAS_ALIENS
+	struct async_alien *alien;
 #endif
 
 	uc_resource_type_t *promise_type;
@@ -130,5 +136,7 @@ async_todo_put_in_list( async_manager_t *manager, async_todo_t *todo);
 extern __hidden int
 async_todo_unlink( async_manager_t *manager, async_todo_t *todo);
 
+extern __hidden void
+async_wakeup( const uc_async_callback_queuer_t *queuer );
 
 #endif // ndef UC_ASYNC_MANAGER_H
