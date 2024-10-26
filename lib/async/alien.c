@@ -22,6 +22,7 @@ This file is part of the async plugin for ucode
 #include <sys/syscall.h>
 #include <err.h>
 #include <errno.h>
+#include <limits.h>
 
 #include "ucode/lib.h"
 #include "ucode/vm.h"
@@ -42,12 +43,9 @@ async_futex(uint32_t *uaddr, int futex_op, uint32_t val,
                           timeout, uaddr2, val3);
 }
 
-
-void
-async_alien_enter( async_manager_t *manager )
+static void 
+async_alien_enter_futex( uint32_t *futex_addr )
 {
-    uint32_t *futex_addr = &manager->alien->the_futex;
-
     while (1) 
     {
         const uint32_t zero = 0;
@@ -64,13 +62,18 @@ async_alien_enter( async_manager_t *manager )
             }
         } 
     }
+
 }
 
 void
-async_alien_release( async_manager_t *manager )
+async_alien_enter( async_manager_t *manager )
 {
-    uint32_t *futex_addr = &manager->alien->the_futex;
+    async_alien_enter_futex( &manager->alien->the_futex );
+}
 
+static void
+async_alien_release_futex( uint32_t *futex_addr )
+{
     const uint32_t zero = 0;
     atomic_store( futex_addr, zero );
     if( -1 == async_futex(futex_addr, FUTEX_WAKE, 0, NULL, NULL, 0) )
@@ -80,64 +83,80 @@ async_alien_release( async_manager_t *manager )
     }
 }
 
+void
+async_alien_release( async_manager_t *manager )
+{
+    async_alien_release_futex( &manager->alien->the_futex );
+}
+
 struct async_alien_impl
 {
     uc_async_alient_t header;
-    const uc_async_callback_queuer_t *queuer;
-    async_manager_t *manager;
+    struct async_alien *alien;
 };
 
 static void 
-_uc_async_alien_free( struct uc_async_alien const ** alien )
+_uc_async_alien_free( struct uc_async_alien const ** palien )
 {
-    if( 0 == alien || 0 == *alien )
+    if( 0 == palien || 0 == *palien )
         return;
-    struct async_alien_impl const *myalien = (struct async_alien_impl const *)*alien;
-    const uc_async_callback_queuer_t *queuer = myalien->queuer;
-    async_manager_t *manager = myalien->manager;
+    struct async_alien_impl const *myalien = (struct async_alien_impl const *)*palien;
+    *palien = 0;
 
-    free( (void *)*alien );
-    *alien = 0;
+    struct async_alien *alien = myalien->alien;
+    free( (void *)myalien );
 
-    if( manager )
+    async_alien_enter_futex( &alien->the_futex );
+
+    if( 0 == --alien->num_aliens )
     {
-        if( 0 == __atomic_add_fetch( &manager->alien->num_aliens, -1, __ATOMIC_RELAXED ) )
+        if( alien->manager )
         {
-            async_wakeup( queuer );
+            async_wakeup( alien->queuer );
+        }
+        else 
+        {
+            uc_async_callback_queuer_free( &alien->queuer );
+            free( alien );
+            return;
         }
     }
 
-    if( queuer )
-    {
-        uc_async_callback_queuer_free( &queuer );
-    }
+    async_alien_release_futex( &alien->the_futex );
 }
 
 static int 
-_uc_async_alien_call( const struct uc_async_alien *alien, int (*func)( uc_vm_t *, void *, int flags ), void *user )
+_uc_async_alien_call( const struct uc_async_alien *_alien, int (*func)( uc_vm_t *, void *, int flags ), void *user )
 {
-    if( !alien )
-        return EXCEPTION_RUNTIME;
-    struct async_alien_impl *myalien = (struct async_alien_impl *)alien;
-    async_manager_t *manager = myalien->manager;
-    if( 0 == manager )
-        return EXCEPTION_RUNTIME;
+    if( !_alien )
+        return INT_MIN;
 
-    ASYNC_ALIENT_ENTER( manager );
-    int todo_seq_before = manager->alien->todo_seq;
+    struct async_alien_impl *myalien = (struct async_alien_impl *)_alien;
+    struct async_alien *alien = myalien->alien;
+
+    async_alien_enter_futex( &alien->the_futex );
+    if( !alien->manager )
+    {
+        // vm already stopped
+        async_alien_release_futex( &alien->the_futex );
+        return INT_MIN;
+    }
+
+    int todo_seq_before = alien->todo_seq;
     struct uc_threadlocal *push = uc_threadlocal_data;
-    uc_threadlocal_data = manager->alien->threadlocal;
+    uc_threadlocal_data = alien->threadlocal;
 
-    int ret = (func)( manager->vm, user, UC_ASYNC_CALLBACK_FLAG_EXECUTE|UC_ASYNC_CALLBACK_FLAG_CLEANUP );
+    int ret = (func)( alien->manager->vm, user, UC_ASYNC_CALLBACK_FLAG_EXECUTE|UC_ASYNC_CALLBACK_FLAG_CLEANUP );
 
     uc_threadlocal_data = push; 
-    if( todo_seq_before != manager->alien->todo_seq )
+    if( todo_seq_before != alien->todo_seq )
     {
         // Something is added to the todolist. 
         // Wakeup script thread to let it reconsider it's sleep duration
-        async_wakeup( myalien->queuer );
+        async_wakeup( alien->queuer );
     }
-    ASYNC_ALIENT_LEAVE( manager );
+
+    async_alien_release_futex( &alien->the_futex );
     return ret;
 }
 
@@ -145,21 +164,34 @@ static const uc_async_alient_t *
 _uc_async_new_alien( struct uc_async_manager *_manager )
 {
     async_manager_t *manager = async_manager_cast( _manager );
-    __atomic_add_fetch( &manager->alien->num_aliens, 1, __ATOMIC_RELAXED );
+    manager->alien->num_aliens++;
     struct async_alien_impl *ret = xalloc( sizeof( struct async_alien_impl ) );
     ret->header.free = _uc_async_alien_free;
     ret->header.call = _uc_async_alien_call;
-    ret->queuer = manager->header.new_callback_queuer( &manager->header );
-    ret->manager = manager;
+    ret->alien = manager->alien;
+    if( 0 == ret->alien->queuer )
+        // only needed to wakeup VM, if needed
+        ret->alien->queuer = manager->header.new_callback_queuer( &manager->header );
+    
     return &ret->header;
 }
 
 void 
 async_alien_free( async_manager_t *manager, struct async_alien *alien )
 {
-    free( alien );
-}
+    // The futex is locked, 
+    alien->manager = 0;
 
+    if( 0 == alien->num_aliens )
+    {
+        uc_async_callback_queuer_free( &alien->queuer );
+        free( alien );
+        return;
+    }
+    
+    // release it, there are still aliens around which will try to enter it.
+    async_alien_release_futex( &alien->the_futex );
+}
 
 #else  // defined ASYNC_HAS_ALIENS
 
@@ -180,6 +212,7 @@ async_alien_init( async_manager_t *manager, uc_value_t *scope )
     manager->alien = xalloc( sizeof( struct async_alien ) );
     manager->alien->threadlocal = uc_threadlocal_data;
     manager->alien->the_futex = 1;
+    manager->alien->manager = manager;
 #endif
 }
 

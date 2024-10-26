@@ -310,6 +310,7 @@ uc_async_alien_free( const uc_async_alient_t **alien )
  * Call a script function from another thread. This call will block if the
  * script is not in 'event pumping' mode.
  * The return value is the return value of func.
+ * When the vm is already exited, or alien is NULL, the return value is INT_MIN
  */
 static inline int 
 uc_async_alien_call( const uc_async_alient_t *alien, int (*func)( uc_vm_t *, void *, int flags ), void *user )

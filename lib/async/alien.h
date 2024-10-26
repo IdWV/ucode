@@ -38,6 +38,10 @@ struct async_alien
 	uint32_t the_futex;
     uint32_t num_aliens;
 
+    // zero if vm ended
+    async_manager_t *manager;
+    const uc_async_callback_queuer_t *queuer;
+
 	struct uc_threadlocal *threadlocal;
 };
 
