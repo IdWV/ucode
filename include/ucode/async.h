@@ -33,6 +33,7 @@
 #ifndef UCODE_ASYNC_H
 #define UCODE_ASYNC_H
 #include "types.h"
+#include <limits.h>
 
 
 /* This is the 'public' interface of the async module */
@@ -301,9 +302,9 @@ uc_async_alien_new( uc_vm_t *vm )
 static inline void
 uc_async_alien_free( const uc_async_alient_t **alien )
 {
-    if( alien && *alien )
-        (*alien)->free( alien );
-    *alien = 0;
+    if( !alien || !*alien )
+        return;
+    (*(*alien)->free)( alien );
 }
 
 /****
@@ -316,8 +317,8 @@ static inline int
 uc_async_alien_call( const uc_async_alient_t *alien, int (*func)( uc_vm_t *, void *, int flags ), void *user )
 {
     if( !alien )
-        return EXCEPTION_RUNTIME;
-    return alien->call( alien, func, user );
+        return INT_MIN;
+    return (*alien->call)( alien, func, user );
 }
 
 /* 'private' interface. Designed to be called from vm.c */
@@ -349,8 +350,8 @@ static inline int uc_async_finish( uc_vm_t *vm, int status, unsigned timeout )
  * but only if the script exits normally. (No exceptions, no exit calls, ...).
  * 
  * This function can be called unconditionally from uv_vm_free(), as it will 
- * detect if cleanup is needed. (uc_async_has_async() will return false, if it's
- * not needed)
+ * detect if cleanup is needed. (uc_async_manager_get() will return NULL 
+ * if async was never imported or it's already cleaned up)
 */
 static inline void uc_async_free( uc_vm_t *vm )
 {
