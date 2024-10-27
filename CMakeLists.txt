@@ -68,6 +68,7 @@ option(LOG_SUPPORT "Log plugin support" ON)
 option(SOCKET_SUPPORT "Socket plugin support" ON)
 option(ZLIB_SUPPORT "Zlib plugin support" ${DEFAULT_ZLIB_SUPPORT})
 option(ASYNC_SUPPORT "Async plugin support" ON)
+option(WORKER_SUPPORT "Worker plugin support" ON)
 
 set(LIB_SEARCH_PATH "${CMAKE_INSTALL_PREFIX}/lib/ucode/*.so:${CMAKE_INSTALL_PREFIX}/share/ucode/*.uc:./*.so:./*.uc" CACHE STRING "Default library search path")
 string(REPLACE ":" "\", \"" LIB_SEARCH_DEFINE "${LIB_SEARCH_PATH}")
@@ -297,6 +298,14 @@ if(ASYNC_SUPPORT)
   set_target_properties(async_lib PROPERTIES OUTPUT_NAME async PREFIX "")
   target_link_options(async_lib PRIVATE ${UCODE_MODULE_LINK_OPTIONS})
 endif()
+
+if(WORKER_SUPPORT)
+  set(LIBRARIES ${LIBRARIES} worker_lib)
+  add_library(worker_lib MODULE lib/worker.c )
+  set_target_properties(worker_lib PROPERTIES OUTPUT_NAME async PREFIX "")
+  target_link_options(worker_lib PRIVATE ${UCODE_MODULE_LINK_OPTIONS})
+endif()
+
 
 if(UNIT_TESTING)
   enable_testing()
