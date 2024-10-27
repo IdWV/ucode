@@ -32,6 +32,7 @@ This file is part of the async plugin for ucode
 #include "manager.h"
 #include "callback.h"
 #include "alien.h"
+#include "queuer.h"
 
 #ifdef ASYNC_HAS_ALIENS
 
@@ -68,6 +69,8 @@ async_alien_enter_futex( uint32_t *futex_addr )
 void
 async_alien_enter( async_manager_t *manager )
 {
+    if( !manager->alien )
+        return;
     async_alien_enter_futex( &manager->alien->the_futex );
 }
 
@@ -86,37 +89,37 @@ async_alien_release_futex( uint32_t *futex_addr )
 void
 async_alien_release( async_manager_t *manager )
 {
+    if( !manager->alien )
+        return;
     async_alien_release_futex( &manager->alien->the_futex );
 }
 
-struct async_alien_impl
+static async_alien_t *
+async_alien_cast( const struct uc_async_alien *_a )
 {
-    uc_async_alient_t header;
-    struct async_alien *alien;
-};
+    return (async_alien_t *)_a;
+}
+
 
 static void 
 _uc_async_alien_free( struct uc_async_alien const ** palien )
 {
     if( 0 == palien || 0 == *palien )
         return;
-    struct async_alien_impl const *myalien = (struct async_alien_impl const *)*palien;
+    async_alien_t *alien = async_alien_cast( *palien );
     *palien = 0;
-
-    struct async_alien *alien = myalien->alien;
-    free( (void *)myalien );
 
     async_alien_enter_futex( &alien->the_futex );
 
-    if( 0 == --alien->num_aliens )
+    if( 0 == --alien->refcount )
     {
         if( alien->manager )
         {
-            async_wakeup( alien->queuer );
+            async_wakeup( alien->header.queuer );
         }
         else 
         {
-            uc_async_callback_queuer_free( &alien->queuer );
+            uc_async_callback_queuer_free( &alien->header.queuer );
             free( alien );
             return;
         }
@@ -131,8 +134,7 @@ _uc_async_alien_call( const struct uc_async_alien *_alien, int (*func)( uc_vm_t 
     if( !_alien )
         return INT_MIN;
 
-    struct async_alien_impl *myalien = (struct async_alien_impl *)_alien;
-    struct async_alien *alien = myalien->alien;
+    async_alien_t *alien = async_alien_cast( _alien );
 
     async_alien_enter_futex( &alien->the_futex );
     if( !alien->manager )
@@ -153,7 +155,7 @@ _uc_async_alien_call( const struct uc_async_alien *_alien, int (*func)( uc_vm_t 
     {
         // Something is added to the todolist. 
         // Wakeup script thread to let it reconsider it's sleep duration
-        async_wakeup( alien->queuer );
+        async_wakeup( alien->header.queuer );
     }
 
     async_alien_release_futex( &alien->the_futex );
@@ -164,27 +166,34 @@ static const uc_async_alient_t *
 _uc_async_new_alien( struct uc_async_manager *_manager )
 {
     async_manager_t *manager = async_manager_cast( _manager );
-    manager->alien->num_aliens++;
-    struct async_alien_impl *ret = xalloc( sizeof( struct async_alien_impl ) );
-    ret->header.free = _uc_async_alien_free;
-    ret->header.call = _uc_async_alien_call;
-    ret->alien = manager->alien;
-    if( 0 == ret->alien->queuer )
-        // only needed to wakeup VM, if needed
-        ret->alien->queuer = manager->header.new_callback_queuer( &manager->header );
-    
-    return &ret->header;
+    async_alien_t *alien = manager->alien;
+    if( 0 == alien )
+    {
+        alien = manager->alien = xalloc( sizeof( struct async_alien ) );
+        alien->threadlocal = uc_threadlocal_data;
+        alien->the_futex = 1;
+        alien->manager = manager;
+        alien->header.queuer = manager->header.new_callback_queuer( &manager->header );
+        alien->header.free = _uc_async_alien_free;
+        alien->header.call = _uc_async_alien_call;
+    }
+    alien->refcount++;
+
+    return &alien->header;
 }
 
 void 
 async_alien_free( async_manager_t *manager, struct async_alien *alien )
 {
+    if( !alien )
+        return;
+
     // The futex is locked, 
     alien->manager = 0;
 
-    if( 0 == alien->num_aliens )
+    if( 0 == alien->refcount )
     {
-        uc_async_callback_queuer_free( &alien->queuer );
+        uc_async_callback_queuer_free( &alien->header.queuer );
         free( alien );
         return;
     }
@@ -207,12 +216,5 @@ void
 async_alien_init( async_manager_t *manager, uc_value_t *scope )
 {
     manager->header.new_alien = _uc_async_new_alien;
-
-#ifdef ASYNC_HAS_ALIENS
-    manager->alien = xalloc( sizeof( struct async_alien ) );
-    manager->alien->threadlocal = uc_threadlocal_data;
-    manager->alien->the_futex = 1;
-    manager->alien->manager = manager;
-#endif
 }
 

@@ -43,7 +43,7 @@ This file is part of the async plugin for ucode
 
 struct async_todo;
 struct async_promise;
-struct async_callback_link;
+struct async_callback_queuer;
 struct async_alien;
 
 struct async_manager
@@ -63,8 +63,7 @@ struct async_manager
     int silent:1; // exit is called, no more output
 
 	// Pointer to linked list of async callback's
-	struct uc_async_callback_queuer *callback_queuer;
-
+	struct async_callback_queuer *callback_queuer;
 
 #ifdef ASYNC_HAS_UPTIME
 	// For uptime
@@ -136,7 +135,19 @@ async_todo_put_in_list( async_manager_t *manager, async_todo_t *todo);
 extern __hidden int
 async_todo_unlink( async_manager_t *manager, async_todo_t *todo);
 
-extern __hidden void
-async_wakeup( const uc_async_callback_queuer_t *queuer );
+#define reverse_stack(type, stack)		 \
+	do									 \
+	{									  \
+		type *walk = stack, *reversed = 0; \
+		while (walk)					   \
+		{								  \
+			type *pop = walk;			  \
+			walk = pop->next;			  \
+			pop->next = reversed;		  \
+			reversed = pop;				\
+		}								  \
+		stack = reversed;				  \
+	} while (0)
+
 
 #endif // ndef UC_ASYNC_MANAGER_H

@@ -38,7 +38,9 @@
 
 /* This is the 'public' interface of the async module */
 typedef struct uc_async_promise_resolver{} uc_async_promise_resolver_t;
+
 typedef struct uc_async_timer {} uc_async_timer_t;
+
 typedef struct uc_async_callback_queuer
 {
     void (*free)( struct uc_async_callback_queuer const ** );
@@ -57,6 +59,9 @@ typedef struct uc_async_alien
 {
     void (*free)( struct uc_async_alien const ** );
     int (*call)( const struct uc_async_alien *, int (*)( uc_vm_t *, void *, int flags ), void * );
+
+    // Internally used, but you are free to queue your own callbacks with it.
+    const uc_async_callback_queuer_t *queuer;
 } uc_async_alient_t;
 
 struct uc_async_manager
@@ -284,6 +289,7 @@ uc_async_promise_reject( uc_vm_t *vm, uc_async_promise_resolver_t **resolver, uc
 /****
  * Create an 'alien' object, that is an object which can call script-native
  * function from an external thread
+ * This function has to be called from the script thread.
  */
 static inline const uc_async_alient_t *
 uc_async_alien_new( uc_vm_t *vm )

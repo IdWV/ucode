@@ -29,31 +29,40 @@ async_alien_enter( async_manager_t *manager );
 extern __hidden void
 async_alien_release( async_manager_t *manager );
 
-struct async_alien
+typedef struct async_alien
 {
+    uc_async_alient_t header;
+
     // Counter which is incremented at each todo added,
     // to know if an alien call should interrupt the sleep
     int todo_seq;
 	
 	uint32_t the_futex;
-    uint32_t num_aliens;
+    uint32_t refcount;
 
     // zero if vm ended
     async_manager_t *manager;
-    const uc_async_callback_queuer_t *queuer;
 
+    
 	struct uc_threadlocal *threadlocal;
-};
+} async_alien_t;
 
 extern __hidden void 
 async_alien_free( async_manager_t *, struct async_alien * );
 
-#   define ASYNC_ALIENT_ENTER(manager) async_alien_enter( manager );
-#   define ASYNC_ALIENT_LEAVE(manager) async_alien_release( manager );
+#   define ASYNC_ALIEN_ENTER(manager) async_alien_enter( manager )
+#   define ASYNC_ALIEN_LEAVE(manager) async_alien_release( manager )
+#   define ASYNC_ALIEN_TODO_INCREMENT(manager) if( manager->alien ) manager->alien->todo_seq++
+#   define IF_NO_MORE_ALIENS(manager) \
+    if( 0 == manager->alien || 0 == manager->alien->refcount ) // no more aliens
+                 
+
 #else // ASYNC_HAS_ALIENS
 
-#   define ASYNC_ALIENT_ENTER(...)
-#   define ASYNC_ALIENT_LEAVE(...)
+#   define ASYNC_ALIEN_ENTER(...) do{}while(0)
+#   define ASYNC_ALIEN_LEAVE(...) do{}while(0)
+#   define ASYNC_ALIEN_TODO_INCREMENT(...) do{}while(0)
+#   define IF_NO_MORE_ALIENS(...)
 #endif // 
 
 extern __hidden void 

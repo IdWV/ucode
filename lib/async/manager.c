@@ -66,9 +66,7 @@ This file is part of the async plugin for ucode
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
-#include <signal.h>
 #include <time.h>
-#include <pthread.h>
 #include <assert.h>
 #include <math.h>
 
@@ -80,6 +78,7 @@ This file is part of the async plugin for ucode
 #include "promise.h"
 #include "callback.h"
 #include "timer.h"
+#include "queuer.h"
 #include "alien.h"
 
 #ifdef ASYNC_HAS_UPTIME
@@ -93,90 +92,8 @@ uptime( async_manager_t *manager )
 }
 #endif
 
-
-/*******
- * The part of the code which is responsible for multithreaded asynchronity
- **/
-#define SIGNEWCALLBACK SIGUSR1 // Signal used for async callbacks
-
-/* There is max one instance of this struct per vm.
-which is created when the first 'uc_async_callback_queuer' is created */
-struct async_callback_unique_in_vm
-{
-	// linked list of callbacks to be executed
-	struct async_callback_queuer_link *stack;
-	int refcount;
-
-	// Thread of the script
-	pthread_t thread;
-	// VM in which we live.
-	async_manager_t *manager;
-};
-
-static uc_value_t *
-async_callback_signal_handler(uc_vm_t *vm, size_t nargs)
-{
-	// Do nothing. We only want to interrupt the async_sleep function
-#ifdef DEBUG_PRINT
-	async_manager_t *manager = async_manager_get( vm );
-	DEBUG_PRINTF( "%-1.3lf Signal handler\n", manager ? uptime(manager) : NAN );
-#endif
-	return 0;
-}
-
-static struct async_callback_unique_in_vm *
-async_unique_in_vm_new( async_manager_t *manager )
-{
-	struct async_callback_unique_in_vm *unique = xalloc(sizeof(struct async_callback_unique_in_vm));
-	unique->refcount = 1;
-
-	// Setup signal handler
-	uc_cfn_ptr_t ucsignal = uc_stdlib_function("signal");
-	uc_value_t *func = ucv_cfunction_new("async", async_callback_signal_handler);
-
-	uc_vm_stack_push( manager->vm, ucv_uint64_new( SIGNEWCALLBACK ));
-	uc_vm_stack_push( manager->vm, func);
-
-	if (ucsignal(manager->vm, 2) != func)
-		fprintf(stderr, "Unable to install async_callback_signal_handler\n");
-
-	ucv_put(uc_vm_stack_pop( manager->vm));
-	ucv_put(uc_vm_stack_pop( manager->vm));
-	ucv_put( func );
-
-	// Remember the thread ID
-	unique->thread = pthread_self();
-	// And the vm
-	unique->manager = manager;
-	return unique;
-}
-
-static async_manager_t *
-async_unique_is_synchron(struct async_callback_unique_in_vm *unique)
-{
-	if (unique->thread == pthread_self())
-		return unique->manager;
-	return 0;
-}
-
-/* Wakeup the sleeping script engine */
-static void
-async_unique_wakeup(struct async_callback_unique_in_vm *unique)
-{
-	if (async_unique_is_synchron( unique ) )
-		// running in the script thread
-		return;
-
-	DEBUG_PRINTF( "%-1.3lf Wakeup script\n", uptime( unique->manager ) );
-	// send a signal to the script thread;
-	union sigval info = {0};
-	info.sival_ptr = (void *)unique->thread;
-
-	pthread_sigqueue(unique->thread, SIGNEWCALLBACK, info);
-}
-
 /* Start an interruptable sleep */
-static void async_unique_sleep(struct async_callback_unique_in_vm *unique, int64_t msec)
+static void async_sleep( async_manager_t *manager, int64_t msec)
 {
 	if (msec < 1)
 		return;
@@ -186,61 +103,6 @@ static void async_unique_sleep(struct async_callback_unique_in_vm *unique, int64
 	wait.tv_nsec = (msec % 1000) * 1000000;
 	nanosleep(&wait, 0);
 }
-
-static int
-async_unique_in_vm_link(struct async_callback_unique_in_vm *unique)
-{
-	return __atomic_add_fetch(&unique->refcount, 1, __ATOMIC_RELAXED);
-}
-
-static int
-async_unique_in_vm_unlink(struct async_callback_unique_in_vm *unique)
-{
-	int refcount = __atomic_add_fetch(&unique->refcount, -1, __ATOMIC_RELAXED);
-	if (refcount)
-		return refcount;
-
-	// TODO: Shouldn't we release the signal handler?
-
-	free(unique);
-	return refcount;
-}
-
-static struct async_callback_queuer_link *
-uc_unique_lock_stack(struct async_callback_unique_in_vm *unique)
-{
-	struct async_callback_queuer_link **pstack = &unique->stack;
-	/*
-	The stack is locked as the least significant bit is 1.
-	So we try to set it, which only succeeds if it is not set now.
-	*/
-	while (true)
-	{
-		struct async_callback_queuer_link *oldstack = *pstack;
-		oldstack = (void *)(((intptr_t)oldstack) & ~(intptr_t)1);
-		struct async_callback_queuer_link *newstack = oldstack;
-		newstack = (void *)(((intptr_t)newstack) | (intptr_t)1);
-		if (__atomic_compare_exchange_n(pstack, &oldstack, newstack, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-		{
-			return oldstack;
-		}
-	}
-}
-
-static void
-uc_unique_unlock_stack(struct async_callback_unique_in_vm *unique, struct async_callback_queuer_link *func)
-{
-	/*
-	Unlock the stack by writing a 'clean' pointer, without bit 0 set.
-	*/
-	__atomic_store_n(&unique->stack, func, __ATOMIC_RELAXED);
-}
-
-/*******
- * End of multithreaded functions
- */
-
-
 
 int
 async_todo_unlink( async_manager_t *manager, async_todo_t *todo)
@@ -290,9 +152,7 @@ async_todo_put_in_list( async_manager_t *manager, async_todo_t *todo)
 	DEBUG_ASSERT( 0 == todo->in_todo_list );
 	todo->in_todo_list = 1;
 
-#ifdef ASYNC_HAS_ALIENS
-    manager->alien->todo_seq++;
-#endif
+	ASYNC_ALIEN_TODO_INCREMENT( manager );
 
 	int64_t due = async_todo_due(todo);
 	if( due )
@@ -323,20 +183,6 @@ async_todo_put_in_list( async_manager_t *manager, async_todo_t *todo)
 		manager->todo_list = todo;
 	todo->refcount++;
 }
-
-#define reverse_stack(type, stack)		 \
-	do									 \
-	{									  \
-		type *walk = stack, *reversed = 0; \
-		while (walk)					   \
-		{								  \
-			type *pop = walk;			  \
-			walk = pop->next;			  \
-			pop->next = reversed;		  \
-			reversed = pop;				\
-		}								  \
-		stack = reversed;				  \
-	} while (0)
 
 static int
 async_handle_todo( async_manager_t *manager )
@@ -467,274 +313,6 @@ async_how_long_to_next_todo( async_manager_t *manager )
 	return -1;
 }
 
-
-struct async_callback_queuer_link
-{
-	struct async_callback_queuer_link *next;
-	struct async_callback callback;
-};
-
-typedef struct
-{
-	struct uc_async_callback_queuer header;
-	struct async_callback_unique_in_vm *unique_in_vm;
-} async_callback_queuer_t;
-
-static inline async_callback_queuer_t *
-async_callback_queuer_cast(struct uc_async_callback_queuer *handler)
-{
-	return (async_callback_queuer_t *)handler;
-}
-
-static inline async_callback_queuer_t const *
-async_callback_queuer_cast_const(struct uc_async_callback_queuer const *handler)
-{
-	return (async_callback_queuer_t const *)handler;
-}
-
-static int
-async_handle_queued_callbacks( async_manager_t *manager )
-{
-	if( 0 == manager || 0 == manager->callback_queuer )
-		return EXCEPTION_NONE;
-	async_callback_queuer_t *l_queuer = async_callback_queuer_cast(manager->callback_queuer);
-	struct async_callback_queuer_link *stack = uc_unique_lock_stack(l_queuer->unique_in_vm);
-	uc_unique_unlock_stack(l_queuer->unique_in_vm, 0);
-
-	if (0 == stack)
-		return EXCEPTION_NONE;
-
-	reverse_stack(struct async_callback_queuer_link, stack);
-
-	while (stack)
-	{
-		struct async_callback_queuer_link *pop = stack;
-		stack = pop->next;
-		int ex = async_callback_call( manager, &pop->callback, 0, 0, 0, true);
-		free( pop );
-		if (EXCEPTION_NONE == ex)
-			continue;
-		if (stack)
-		{
-			// put remaining stack back
-			struct async_callback_queuer_link *last = stack;
-			reverse_stack(struct async_callback_queuer_link, stack);
-			last->next = uc_unique_lock_stack(l_queuer->unique_in_vm);
-			uc_unique_unlock_stack(l_queuer->unique_in_vm, stack);
-		}
-		return ex;
-	}
-	return EXCEPTION_NONE;
-}
-
-static bool
-async_any_queued_callbacks_waiting( async_manager_t *manager )
-{
-	if (0 == manager || 0 == manager->callback_queuer)
-		return false;
-	async_callback_queuer_t *l_queuer = async_callback_queuer_cast(manager->callback_queuer);
-	if ((intptr_t)l_queuer->unique_in_vm->stack & ~(intptr_t)3)
-		return true;
-	return false;
-}
-
-static bool
-_uc_async_request_callback(struct uc_async_callback_queuer const *queuer,
-						   int (*func)(struct uc_vm *, void *, int), void *user)
-{
-	struct async_callback_queuer_link *pfunc = xalloc(sizeof(struct async_callback_queuer_link));
-	pfunc->callback.callback_type = callbackC_int_user_flags;
-	pfunc->callback.c_int_user_flags.func = func;
-	pfunc->callback.c_int_user_flags.user = user;
-
-	const async_callback_queuer_t *l_queuer = async_callback_queuer_cast_const(queuer);
-
-	struct async_callback_queuer_link *stack = uc_unique_lock_stack(l_queuer->unique_in_vm);
-
-	if (stack == (struct async_callback_queuer_link *)l_queuer->unique_in_vm)
-	{
-		// vm doesn't exist anymore
-		uc_unique_unlock_stack(l_queuer->unique_in_vm, stack);
-		free(pfunc);
-		return false;
-	}
-
-	pfunc->next = stack;
-	uc_unique_unlock_stack(l_queuer->unique_in_vm, pfunc);
-
-	async_unique_wakeup( l_queuer->unique_in_vm );
-	return true;
-}
-
-void
-async_wakeup( const uc_async_callback_queuer_t *queuer )
-{
-	if( !queuer )
-		return;
-	const async_callback_queuer_t *queuer2 = async_callback_queuer_cast_const( queuer );
-	async_unique_wakeup( queuer2->unique_in_vm );	
-}
-
-
-static void
-_uc_async_callback_queuer_free(struct uc_async_callback_queuer const **pqueuer)
-{
-	if (0 == pqueuer || 0 == *pqueuer)
-		return;
-	async_callback_queuer_t const *l_queuer = async_callback_queuer_cast_const(*pqueuer);
-	*pqueuer = 0;
-
-	struct async_callback_unique_in_vm *unique_in_vm = l_queuer->unique_in_vm;
-	free((void *)l_queuer);
-	async_unique_in_vm_unlink(unique_in_vm);
-}
-
-static int _async_put_todo_in_list( uc_vm_t *vm, void *user, int flags)
-{
-	async_todo_t *todo = user;
-	async_manager_t *manager = async_manager_get( vm );
-
-	if (flags & UC_ASYNC_CALLBACK_FLAG_EXECUTE)
-	{
-		async_todo_put_in_list( manager, todo );
-	}
-	if (flags & UC_ASYNC_CALLBACK_FLAG_CLEANUP)
-	{
-		async_todo_unlink( manager, todo );
-	}
-	return EXCEPTION_NONE;
-}
-
-static uc_async_timer_t *
-_uc_async_create_timer(struct uc_async_callback_queuer const *queuer,
-					   int (*cb)(uc_vm_t *, void *, int), void *user, uint32_t msec, bool periodic)
-{
-	async_timer_t *timer = async_timer_c_int_user_flags_new(0, cb, user);
-	timer->due = async_timer_current_time() + msec;
-	if (periodic)
-		timer->periodic = msec;
-	timer->header.refcount++;
-
-	async_callback_queuer_t const *l_queuer = async_callback_queuer_cast_const(queuer);
-
-	// are we synchron?
-	async_manager_t *manager = async_unique_is_synchron(l_queuer->unique_in_vm);
-	if (manager)
-	{
-		_async_put_todo_in_list( manager->vm, &timer->header, UC_ASYNC_CALLBACK_FLAG_EXECUTE | UC_ASYNC_CALLBACK_FLAG_CLEANUP);
-	}
-	else
-	{
-		_uc_async_request_callback(queuer, _async_put_todo_in_list, &timer->header );
-	}
-
-	return &timer->header.header;
-}
-
-static int
-_async_free_timer(uc_vm_t *vm, void *user, int flags)
-{
-	uintptr_t v = (uintptr_t)user;
-	bool clear = v & 1;
-	v = v & ~((uintptr_t)1);
-	async_timer_t *timer = (async_timer_t *)v;
-	async_manager_t *manager = async_manager_get(vm);
-	if (flags & UC_ASYNC_CALLBACK_FLAG_EXECUTE)
-	{
-		if (clear)
-			async_timer_destroy( manager, &timer->header );
-	}
-	if (flags & UC_ASYNC_CALLBACK_FLAG_CLEANUP)
-	{
-		async_todo_unlink( async_manager_get(vm), &timer->header);
-	}
-	return EXCEPTION_NONE;
-}
-
-static void
-_uc_async_free_timer(struct uc_async_callback_queuer const *queuer,
-					 uc_async_timer_t **_pptimer, bool clear)
-{
-	async_callback_queuer_t const *l_queuer = async_callback_queuer_cast_const(queuer);
-	async_timer_t **pptimer = (async_timer_t **)_pptimer;
-	if (!pptimer || !*pptimer)
-		return;
-	async_timer_t *timer = *pptimer;
-	*_pptimer = 0;
-
-	// use bit 0 to store the clear flag
-	if (clear)
-	{
-		timer = (async_timer_t *)(((uintptr_t)timer) | 1);
-	}
-
-	// are we synchron?
-	async_manager_t *manager = async_unique_is_synchron(l_queuer->unique_in_vm);
-	if (manager)
-	{
-		_async_free_timer( manager->vm, timer, UC_ASYNC_CALLBACK_FLAG_EXECUTE | UC_ASYNC_CALLBACK_FLAG_CLEANUP);
-	}
-	else
-	{
-		_uc_async_request_callback(queuer, _async_free_timer, timer);
-	}
-}
-
-static async_callback_queuer_t *
-async_callback_queuer_new()
-{
-	async_callback_queuer_t *pcallbackhandler = xalloc(sizeof(async_callback_queuer_t));
-	pcallbackhandler->header.free = _uc_async_callback_queuer_free;
-	pcallbackhandler->header.request_callback = _uc_async_request_callback;
-	pcallbackhandler->header.create_timer = _uc_async_create_timer;
-	pcallbackhandler->header.free_timer = _uc_async_free_timer;
-	return pcallbackhandler;
-}
-
-static struct uc_async_callback_queuer const *
-_uc_async_new_callback_queuer( struct uc_async_manager *_man )
-{
-	async_manager_t *manager = async_manager_cast( _man );
-	if( 0 == manager )
-		return 0;
-
-	if (0 == manager->callback_queuer)
-	{
-		async_callback_queuer_t *pcallbackhandler = async_callback_queuer_new();
-		manager->callback_queuer = &pcallbackhandler->header;
-		pcallbackhandler->unique_in_vm = async_unique_in_vm_new(manager);
-	}
-
-	async_callback_queuer_t *l_queuer = async_callback_queuer_cast(manager->callback_queuer);
-	struct async_callback_unique_in_vm *unique_in_vm = l_queuer->unique_in_vm;
-	async_callback_queuer_t *pcallbackhandler = async_callback_queuer_new();
-	async_unique_in_vm_link(unique_in_vm);
-	pcallbackhandler->unique_in_vm = unique_in_vm;
-	return &pcallbackhandler->header;
-}
-
-static void
-async_callback_queuer_free( async_manager_t *manager, struct uc_async_callback_queuer *queuer)
-{
-	if (0 == queuer)
-		return;
-	async_callback_queuer_t *l_queuer = async_callback_queuer_cast(queuer);
-	struct async_callback_queuer_link *stack = uc_unique_lock_stack(l_queuer->unique_in_vm);
-	// write sentinel value meaning that callbacks are disabled forever
-	uc_unique_unlock_stack(l_queuer->unique_in_vm, (void *)l_queuer->unique_in_vm);
-
-	struct uc_async_callback_queuer const *pconsth = queuer;
-	_uc_async_callback_queuer_free(&pconsth);
-
-	// call all function on stack with exec=false to make them able to free up resources
-	while (stack)
-	{
-		struct async_callback_queuer_link *pop = stack;
-		stack = pop->next;
-		async_callback_destroy( manager->vm, &pop->callback);
-	}
-}
-
 static void
 async_manager_free(uc_vm_t *vm, async_manager_t *manager)
 {
@@ -746,10 +324,17 @@ async_manager_free(uc_vm_t *vm, async_manager_t *manager)
 		async_todo_unlink( manager, pop);
 	}
 
-	async_callback_queuer_free( manager, manager->callback_queuer);
-
+	{
+		struct async_callback_queuer *queuer = manager->callback_queuer;
+		manager->callback_queuer = 0;
+		async_callback_queuer_free( manager, queuer );
+	}
 #ifdef ASYNC_HAS_ALIENS
-	async_alien_free( manager, manager->alien );
+	{
+		async_alien_t *alien = manager->alien;
+		manager->alien = 0;
+		async_alien_free( manager, alien );
+	}
 #endif
 	free(manager);
 }
@@ -802,9 +387,8 @@ async_event_pump( struct uc_async_manager *_man, unsigned max_wait, int flags)
 			{
 				if( 0 == manager->pending_promises_cnt ) // no pending promises
 				{
-#ifdef ASYNC_HAS_ALIENS
-                    if( 0 == manager->alien->num_aliens ) // no more aliens
-#endif                    
+					
+					IF_NO_MORE_ALIENS(manager)
 					{
 						// Nothing to do anymore
 						DEBUG_PRINTF("%-1.3lf Last!\n", uptime( manager ));
@@ -816,7 +400,7 @@ async_event_pump( struct uc_async_manager *_man, unsigned max_wait, int flags)
 
 			if (max_wait && !async_any_queued_callbacks_waiting( manager ))
 			{
-                ASYNC_ALIENT_LEAVE(manager);
+                ASYNC_ALIEN_LEAVE(manager);
 
 				if ((unsigned)tosleep > max_wait)
 					tosleep = max_wait;
@@ -828,16 +412,16 @@ async_event_pump( struct uc_async_manager *_man, unsigned max_wait, int flags)
 					So look if something was added to the async stack */
 					if( !async_any_queued_callbacks_waiting( manager ) )
 #endif
-						async_unique_sleep(0, tosleep);
+						async_sleep( manager, tosleep);
 					DEBUG_PRINTF("%-1.3lf End wait\n", uptime( manager ));
 				}
 
-                ASYNC_ALIENT_ENTER(manager);
+                ASYNC_ALIEN_ENTER(manager);
 			}
             else
             {
-                ASYNC_ALIENT_LEAVE(manager);
-                ASYNC_ALIENT_ENTER(manager);
+                ASYNC_ALIEN_LEAVE(manager);
+                ASYNC_ALIEN_ENTER(manager);
             }
 
 		} while ((flags & UC_ASYNC_PUMP_CYCLIC) &&
@@ -1014,10 +598,10 @@ void uc_module_init(uc_vm_t *vm, uc_value_t *scope)
 	manager->vm = vm;
 
 	manager->header.event_pump = async_event_pump;
-	manager->header.new_callback_queuer = _uc_async_new_callback_queuer;
 
 	async_promise_init( manager, scope );
 	async_timer_init( manager, scope );
+	async_callback_queuer_init( manager, scope );
 	async_alien_init( manager, scope );
 
 	uc_function_list_register(scope, local_async_fns);
