@@ -38,6 +38,8 @@ typedef enum
     typeJsonObject,
 } interscript_type_t;
 
+
+
 enum
 {
     contentNone = 0,
@@ -45,6 +47,9 @@ enum
     contentArgs,
     contentResolve,
     contentReject,
+
+    contentBuffer,
+    contentFilename,
 };
 
 typedef struct interscript
@@ -87,7 +92,12 @@ static void
 interscript_copy_value( interscript_t *is, uc_value_t *value )
 {
     interscript_cleanup( is );
-
+    if( 0 == value )
+    {
+        is->uc_value = 0;
+        is->type = typeUcValue;
+        return;
+    }
     switch( value->type )
     {
         case UC_BOOLEAN:
@@ -170,30 +180,37 @@ interscript_to_value( uc_vm_t *vm, interscript_t *is )
 
 struct uc_worker
 {
-    uc_vm_t vm;
     uc_async_promise_resolver_t *resolver;
     const uc_async_callback_queuer_t *queuer;
 
     interscript_t data;
-    char *source;
+    struct{
+        char *source;
+        int content;
+    } run;
 
     pthread_t tid;
     uc_parse_config_t config;
 };
 
+struct worker_vm
+{
+    uc_vm_t vm;
+    struct uc_worker *worker;
+};
+
 static struct uc_worker *
 uc_worker_cast( uc_vm_t *vm )
 {
-    return (struct uc_worker *)vm;
+    return ((struct worker_vm *)vm)->worker;
 }
 
 static void
 uc_worker_free( struct uc_worker *worker, bool insync )
 {
-    if( worker->source )
-        free( worker->source );
+    if( worker->run.source )
+        free( worker->run.source );
     interscript_cleanup( &worker->data );
-    if( worker->source )    free( worker->source );
     uc_async_callback_queuer_free( &worker->queuer );
     if( insync )
     {
@@ -226,10 +243,18 @@ static void *
 uc_worker_thread( void *arg )
 {
     struct uc_worker *worker = arg;
-	
-    /* create a source buffer containing the program code */
-	uc_source_t *src = uc_source_new_buffer("worker", worker->source, strlen(worker->source) );
-    worker->source = 0;
+
+    uc_source_t *src  = 0;
+    if( contentBuffer == worker->run.content )
+    {
+        /* create a source buffer containing the program code */
+	    src = uc_source_new_buffer("worker", worker->run.source, strlen(worker->run.source) );
+        worker->run.source = 0;
+    }
+    else if( contentFilename == worker->run.content )
+    {
+        src = uc_source_new_file( worker->run.source );
+    }
 
 	/* compile source buffer into function */
 	char *syntax_error = NULL;
@@ -253,22 +278,26 @@ uc_worker_thread( void *arg )
 		return 0;
 	}
 
+    struct worker_vm myvm;
+    memset( &myvm, 0, sizeof( struct worker_vm ) );
+    myvm.worker = worker;
+    uc_vm_t *vm = &myvm.vm;
 	/* initialize VM context */
-	uc_vm_init(&worker->vm, &worker->config);
+	uc_vm_init( vm, &worker->config);
 
 	/* load standard library into global VM scope */
-	uc_stdlib_load(uc_vm_scope_get(&worker->vm));
+	uc_stdlib_load(uc_vm_scope_get( vm ));
 
-    uc_vm_registry_set( &worker->vm, "worker.isPromise", ucv_boolean_new( true ) );
+    uc_vm_registry_set( vm, "worker.isPromise", ucv_boolean_new( true ) );
 
 	/* execute program function */
-	int return_code = uc_vm_execute(&worker->vm, program, NULL);
+	int return_code = uc_vm_execute( vm, program, NULL);
 
 	/* release program */
 	uc_program_put(program);
 
 	/* free VM context */
-	uc_vm_free(&worker->vm);
+	uc_vm_free( vm);
 
    	/* free search module path vector */
     uc_search_path_free(&worker->config.module_search_path);
@@ -325,12 +354,25 @@ uc_Promise( uc_vm_t *vm, size_t nargs )
     interscript_copy_value( &worker->data, uc_fn_arg(0) );
     worker->data.content = contentArgs;
 
+    uc_source_t *source = 0;
+
     if( !vm->callframes.count ||
         !vm->callframes.entries->closure ||
         !vm->callframes.entries->closure->function ||
         !vm->callframes.entries->closure->function->program ||
-        !vm->callframes.entries->closure->function->program->sources.count ||
-        !(*vm->callframes.entries->closure->function->program->sources.entries)->buffer )
+        !vm->callframes.entries->closure->function->program->sources.count )
+    {
+        uc_async_promise_reject( vm, &worker->resolver, 
+            ucv_string_new( "Cannot get script source" ) );
+        uc_worker_free( worker, false );
+        return promise;
+    }
+    else 
+    {
+        source = (*vm->callframes.entries->closure->function->program->sources.entries);
+    }
+
+    if( !source->filename && !source->buffer )
     {
         uc_async_promise_reject( vm, &worker->resolver, 
             ucv_string_new( "Cannot get script source" ) );
@@ -338,7 +380,16 @@ uc_Promise( uc_vm_t *vm, size_t nargs )
         return promise;
     }
 
-    worker->source = xstrdup( (*vm->callframes.entries->closure->function->program->sources.entries)->buffer );
+    if( source->buffer )
+    {
+        worker->run.source = xstrdup( source->buffer );
+        worker->run.content = contentBuffer;
+    }
+    else 
+    {
+        worker->run.source = xstrdup( source->filename );
+        worker->run.content = contentFilename;
+    }
 
     memcpy( &worker->config, vm->config, sizeof( worker->config ) );
     worker->config.module_search_path.count = 0;
@@ -389,11 +440,12 @@ static uc_value_t *
 uc_ResolveReject( uc_vm_t *vm, size_t nargs, int content )
 {
     struct uc_worker *worker = uc_worker_cast( vm );
-    interscript_copy_value( &worker->data, uc_fn_arg(0) );
+    uc_value_t *value = uc_fn_arg(0);
+    interscript_copy_value( &worker->data, value );
     worker->data.content = content;
 
 	vm->arg.s32 = (int32_t)0;
-	uc_vm_raise_exception(vm, EXCEPTION_EXIT, 0 );
+	uc_vm_raise_exception(vm, EXCEPTION_EXIT, " " );
     return 0;
 
 }

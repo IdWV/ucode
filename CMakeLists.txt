@@ -3,7 +3,7 @@ include(CheckFunctionExists)
 include(CheckSymbolExists)
 
 project(ucode C)
-add_definitions(-Os -Wall -Werror --std=gnu99 -ffunction-sections -fwrapv -D_GNU_SOURCE)
+add_definitions(-Og -Wall -Werror --std=gnu99 -ffunction-sections -fwrapv -D_GNU_SOURCE)
 
 if(CMAKE_C_COMPILER_VERSION VERSION_GREATER 6)
 	add_definitions(-Wextra -Werror=implicit-function-declaration)
@@ -302,7 +302,7 @@ endif()
 if(WORKER_SUPPORT)
   set(LIBRARIES ${LIBRARIES} worker_lib)
   add_library(worker_lib MODULE lib/worker.c )
-  set_target_properties(worker_lib PROPERTIES OUTPUT_NAME async PREFIX "")
+  set_target_properties(worker_lib PROPERTIES OUTPUT_NAME worker PREFIX "")
   target_link_options(worker_lib PRIVATE ${UCODE_MODULE_LINK_OPTIONS})
 endif()
 
