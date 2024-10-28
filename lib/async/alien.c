@@ -20,6 +20,7 @@ This file is part of the async plugin for ucode
 #include <linux/futex.h>
 #include <stdatomic.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 #include <err.h>
 #include <errno.h>
 #include <limits.h>
