@@ -304,6 +304,7 @@ if(WORKER_SUPPORT)
   add_library(worker_lib MODULE lib/worker.c )
   set_target_properties(worker_lib PROPERTIES OUTPUT_NAME worker PREFIX "")
   target_link_options(worker_lib PRIVATE ${UCODE_MODULE_LINK_OPTIONS})
+  target_link_libraries(worker_lib pthread)
 endif()
 
 
