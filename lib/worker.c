@@ -414,7 +414,7 @@ close_object( void *obj )
 }
 
 static uc_value_t *
-uc_Join( uc_vm_t *vm, size_t nargs )
+uc_JoinCommon( uc_vm_t *vm, size_t nargs, bool try )
 {
    	uc_worker_t **pworker = uc_fn_this( "worker.thread" );
     if( !pworker || !*pworker )
@@ -426,12 +426,24 @@ uc_Join( uc_vm_t *vm, size_t nargs )
         pthread_t tid = worker->tid;
         worker->tid = 0;
         void *ret;
-        pthread_join( tid, &ret );
+        if( try )
+        {
+            if( 0 != pthread_tryjoin_np( tid, &ret ) )
+            {
+                worker->tid = tid;
+                return 0;
+            }
+        }
+        else 
+            pthread_join( tid, &ret );
     }
 
     if( contentResolve == worker->exchange.content )
     {
-        return interscript_to_value( vm, &worker->exchange );
+        uc_value_t *ret = interscript_to_value( vm, &worker->exchange );
+        if( try && 0 == ret )
+            ret = ucv_string_new( "null" );
+        return ret;
     }
 
     int exit = worker->exchange.exit;
@@ -457,8 +469,22 @@ uc_Join( uc_vm_t *vm, size_t nargs )
     return 0;
 }
 
+static uc_value_t *
+uc_Join( uc_vm_t *vm, size_t nargs )
+{
+    return uc_JoinCommon( vm, nargs, false );
+}
+
+static uc_value_t *
+uc_TryJoin( uc_vm_t *vm, size_t nargs )
+{
+    return uc_JoinCommon( vm, nargs, true );
+}
+
+
 static const uc_function_list_t object_fns[] = {
-	{ "join", uc_Join }
+	{ "join", uc_Join },
+    { "tryjoin", uc_TryJoin }
 };
 
 static void
@@ -533,7 +559,12 @@ uc_GetScriptSource( uc_vm_t *vm )
  * @class module:worker.thread
  * @hideconstructor
  *
- * @implements join()
+ * @implements join(), tryjoin()
+ * 
+ * join() blocks until the thread is terminated.
+ * tryjoin() returns null if the thread is still running. 
+ * When the thread actually returns a null, tryjoin() returns a string 
+ * 'null' instead.
  * 
  * @example
  *
