@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024 Isaac de Wolff
+ * Copyright (C) 2024 Isaac de Wolff <idewolff@gmx.com>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
