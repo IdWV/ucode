@@ -604,7 +604,7 @@ void uc_module_init(uc_vm_t *vm, uc_value_t *scope)
 
 	async_manager_t *manager = xalloc(sizeof(async_manager_t));
 	const uc_function_list_t manager_type_fns[0];
-	uc_resource_type_t *managertype = uc_type_declare(vm, "async.manager", manager_type_fns, close_manager);
+	uc_resource_type_t *managertype = _uc_type_declare( vm, "async.manager", 0, 0, close_manager );
 	uc_value_t *uv_manager = ucv_resource_new(managertype, async_manager_link( manager ) );
 	uc_vm_registry_set(vm, "async.manager", uv_manager);
 	manager->vm = vm;
