@@ -546,6 +546,8 @@ async_promise_do( async_manager_t *manager, async_todo_t *todo)
 			async_promise_method_t *previous = 0;
 			for (async_promise_method_t *it2 = new_promise->stack; it2; it2 = it2->next)
 			{
+				new_promise->header.refcount--;
+				promise->header.refcount++;
 				previous = it2;
 			}
 			if (previous)
